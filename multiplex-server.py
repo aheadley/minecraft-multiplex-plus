@@ -6,17 +6,34 @@ from subprocess import Popen, PIPE
 import socket
 import select
 import sys
+import os
+from StringIO import StringIO
 
 class MultiplexServerException(Exception):
     pass
 
 class MultiplexServer(object):
     default_config = """
+    [%s]
+    port=9001
+    password=
+    password_gracetime=15
+    socket_type=AF_UNIX
+    listen_addr=%s.sock
+    listen_timeout=10
+    [java]
+    server_jar=minecraft_server.jar
+    server_gui=false
+    heap_max=1024M
+    heap_min=1024M
     """
+    _config_name = 'multiplexserver'
 
     def __init__(self, config=None):
+        self.default_config = self.__class__.default_config % (
+            self._config_name, self._config_name)
         if config is None:
-            self.load_config(self.__class__.default_config)
+            self.load_config(self.default_config)
         else:
             self.load_config(config)
         self.running = False
@@ -42,9 +59,9 @@ class MultiplexServer(object):
             except:
                 pass
         self.socket.close()
-        if self.config['socket_type'] == 'AF_UNIX':
-            import os
-            os.remove(self.config['listen_addr'])
+        if self.config[self._config_name]['socket_type'] == 'AF_UNIX':
+            os.remove(self.config[self._config_name]['listen_addr'])
+        self.send_minecraft_command('stop')
         self.running = False
 
     def _run(self):
@@ -64,8 +81,8 @@ class MultiplexServer(object):
             if not read_ready:
                 for client in self.clients:
                     if time() - self.clients[client]['connected'] > \
-                        self.config['password_gracetime'] and \
-                        not self.require_password:
+                        int(self.config[self._config_name]['password_gracetime']) and \
+                        not self.config[self._config_name]['password']:
                         self.remove_peer(client)
                         break
             else:
@@ -76,14 +93,14 @@ class MultiplexServer(object):
                         client, address = self.socket.accept()
                         self.outputs.append(client)
 
-                        if self.config['password']:
+                        if self.config[self._config_name]['password']:
                             self.send_peer(client, '- Enter password')
                         else:
                             self.send_pear(client, '+ Welcome')
 
                         self.clients[client] = {
                             'socket': client,
-                            'auth': bool(self.config['password']),
+                            'auth': bool(self.config[self._config_name]['password']),
                             'connected': time(),
                         }
                     elif sock in self.clients:
@@ -107,7 +124,8 @@ class MultiplexServer(object):
                                     self.send_peer(sock, '+ Closing')
                                     self.remove_peer(sock)
                                 elif buffer.rstrip() == '.time':
-                                    self.send_peer(sock, '+ Start time %i' % int(self.start_time))
+                                    self.send_peer(sock, '+ Start time %i' %
+                                        int(self.start_time))
                                 else:
                                     self.send_minecraft_command(buffer.rstrip())
                         except Exception:
@@ -144,11 +162,11 @@ class MultiplexServer(object):
     def _start_minecraft(self):
         command = [
             'java',
-            '-Xmx%s' % self.config['java_heap_max'],
-            '-Xms%s' % self.config['java_heap_min'],
+            '-Xmx%s' % self.config['java']['heap_max'],
+            '-Xms%s' % self.config['java']['heap_min'],
             '-jar',
-            self.config['server_jar'],
-            self.config['server_gui'],
+            self.config['java']['server_jar'],
+            self.config['java']['server_gui'],
         ]
         self.minecraft_server = Popen(
             command,
@@ -165,24 +183,45 @@ class MultiplexServer(object):
         self.start_time = time()
 
     def _start_listening(self):
-        listen_timeout = 10
         try:
-            socket_type = getattr(socket, self.config['socket_type'])
+            socket_type = getattr(socket,
+                self.config[self._config_name]['socket_type'])
         except AttributeError:
             socket_type = socket.AF_INET
         self.socket = socket.socket(socket_type, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         if socket_type == socket.AF_UNIX:
-            self.socket.bind(self.config['listen_addr'])
+            self.socket.bind(self.config[self._config_name]['listen_addr'])
         else:
-            self.socket.bind(self.config['listen_addr'], self.config['listen_port'])
-        self.socket.listen(listen_timeout)
+            self.socket.bind(self.config[self._config_name]['listen_addr'],
+                self.config[self._config_name]['listen_port'])
+        self.socket.listen(self.config[self._config_name]['listen_timeout'])
         
     def send_minecraft_command(self, command):
         self.minecraft_server.stdin.write('%s\n' % command)
 
     def load_config(self, config):
+        self.config = {}
+        parser = ConfigParser.ConfigParser()
+        if isinstance(config, basestring):
+            if os.path.isfile(config):
+                parser.read(config)
+            else:
+                parser.readfp(StringIO(config))
+        elif isinstance(config, file):
+            parser.readfp(config)
+        else:
+            raise MultiplexServerException('Couldn\'t find parser for config')
+
+        self.config = {}
+        for section in parser.sections():
+            items = parser.items(section)
+            self.config[section] = dict(zip(
+                [item[0] for item in items],
+                [item[1] for item in items]))
+
+    def check_config(self):
         pass
 
     def save_config(self):
