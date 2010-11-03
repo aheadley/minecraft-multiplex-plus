@@ -6,7 +6,7 @@ from subprocess import Popen, PIPE
 import socket
 import select
 import sys
-import os
+import os.path
 from StringIO import StringIO
 
 class MultiplexServerException(Exception):

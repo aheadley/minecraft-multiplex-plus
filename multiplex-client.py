@@ -4,6 +4,7 @@ import socket
 import select
 import re
 import ConfigParser
+import os.path
 from StringIO import StringIO
 from textwrap import wrap
 
