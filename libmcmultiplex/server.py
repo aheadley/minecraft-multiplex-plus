@@ -9,10 +9,10 @@ import sys
 import os.path
 from StringIO import StringIO
 
-class MultiplexServerException(Exception):
+class ServerException(Exception):
     pass
 
-class MultiplexServer(object):
+class Server(object):
     default_config = """
     [%s]
     port=9001
@@ -27,7 +27,7 @@ class MultiplexServer(object):
     heap_max=1024M
     heap_min=1024M
     """
-    _config_name = 'multiplexserver'
+    _config_name = 'Server'
 
     def __init__(self, config=None):
         self.default_config = self.__class__.default_config % (
@@ -212,7 +212,7 @@ class MultiplexServer(object):
         elif isinstance(config, file):
             parser.readfp(config)
         else:
-            raise MultiplexServerException('Couldn\'t find parser for config')
+            raise ServerException('Couldn\'t find parser for config')
 
         self.config = {}
         for section in parser.sections():
@@ -228,5 +228,5 @@ class MultiplexServer(object):
         pass
 
 if __name__ == '__main__':
-    server = MultiplexServer(sys.argv[1])
+    server = Server(sys.argv[1])
     server.start()

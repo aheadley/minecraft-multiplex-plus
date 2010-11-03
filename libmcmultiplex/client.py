@@ -8,10 +8,22 @@ import os.path
 from StringIO import StringIO
 from textwrap import wrap
 
-class MultiplexClientException(Exception):
+from events import EVENTS
+
+class ClientException(Exception):
     pass
 
-class MultiplexClient(object):
+class ClientInvalidTargetException(ClientException):
+    def __init__(self, player, message=None):
+        self.target = target
+        if message is not None:
+            self.message = message
+        else:
+            self.message = 'not found or invalid'
+    def __str__(self):
+        return '%s %s.' % (self.target, self.message)
+
+class Client(object):
     default_config = """
     [%s]
     port=9001
@@ -21,6 +33,10 @@ class MultiplexClient(object):
     """
     _config_name = 'multiplexclient'
 
+    _line_width = 44
+    _stack_size = 64
+    _say_wrap_indent = _tell_wrap_indent = '>>'
+
     def __init__(self, config=None):
         self.default_config = self.__class__.default_config % \
             self.__class__._config_name
@@ -29,7 +45,14 @@ class MultiplexClient(object):
         else:
             self.load_config(config)
         self.running = False
-            
+        self.bootstrap()
+
+    def bootstrap(self):
+        self.players = {}
+        self.ops = []
+        self.banned_players = []
+        self.banned_ips = []
+
     def __del__(self):
         if self.running:
             self.stop()
@@ -48,8 +71,34 @@ class MultiplexClient(object):
         self.socket.send(command.encode('utf-8') + '\n')
 
     def dispatch_event(self, line):
-        pass
-
+        line = line.strip()
+        for event in EVENTS:
+            if isinstance(EVENTS[event], list):
+                break_ = False
+                for event_pattern in EVENTS[event]:
+                    match = event_pattern.match(line)
+                    if match:
+                        try:
+                            getattr(self, 'on_%s' % event)(**match.groupdict())
+                        except AttributeError:
+                            pass
+                        break_ = True
+                        break
+                if break_:
+                    break
+            else:
+                match = EVENTS[event].match(line)
+                if match:
+                    try:
+                        getattr(self, 'on_%s' % event)(**match.groupdict())
+                    except AttributeError:
+                        pass
+                    break
+        try:
+            self.on_raw(line)
+        except AttributeError:
+            pass
+                
     def _run(self):
         keep_running = True
         while keep_running:
@@ -58,9 +107,9 @@ class MultiplexClient(object):
                     [],
                     [self.socket])
             except select.error, error:
-                raise MultiplexClientException(error)
+                raise ClientException(error)
             if self.socket in errset:
-                raise MultiplexClientException('client in errset')
+                raise ClientException('Client in errset')
             elif self.socket in outset:
                 self.dispatch_event(self._receive())
 
@@ -77,14 +126,14 @@ class MultiplexClient(object):
                 self.socket.connect((self.config[self._config_name]['listen_addr'],
                     self.config[self._config_name['port']]))
         except socket.error, error:
-            raise MultiplexClientException(error)
+            raise ClientException(error)
 
         password_line = self.receive()
         if password_line.startswith('-'):
             self.send_command(self.config[self._config_name]['password'])
             reply = self.receive()
             if reply.startswith('-'):
-                raise MultiplexClientException('bad password')
+                raise ClientException('Bad password.')
 
     def _disconnect(self):
         self.send_command('.close')
@@ -95,7 +144,7 @@ class MultiplexClient(object):
     def _receive(self):
         buffer = self.socket_fd.readline()
         if not buffer:
-            raise MultiplexClientException('empty buffer')
+            raise ClientException('Empty buffer.')
         return buffer.decode('utf-8').rstrip()
 
     def load_config(self, config):
@@ -109,7 +158,7 @@ class MultiplexClient(object):
         elif isinstance(config, file):
             parser.readfp(config)
         else:
-            raise MultiplexClientException('Couldn\'t find parser for config')
+            raise ClientException('Couldn\'t find parser for config')
 
         self.config = {}
         for section in parser.sections():
@@ -118,60 +167,101 @@ class MultiplexClient(object):
                 [item[0] for item in items],
                 [item[1] for item in items]))
 
-    def check_config(self):
-        pass
-
-    def save_config(self):
-        pass
-
     def say(self, message, no_wrap=False):
-        line_width = 44
-        message = wrap(
-            message,
-            width=line_width,
-            subsequent_indent='  ')
-        for line in message:
-            self.send_command('say %s' % line)
+        if no_wrap:
+            self.send_command('say %s' % message)
+        else:
+            message = wrap(
+                message,
+                width=self._line_width,
+                subsequent_indent=self._say_wrap_indent)
+            for line in message:
+                self.send_command('say %s' % line)
 
     def kick(self, target):
-        if not isinstance(target, list):
-            target = [target,]
-        map(self.send_command, ['kick %s' % player for player in filter(
-            lambda player: player in self.query_players(), target)])
+        if target.lower() not in self.players:
+            raise ClientInvalidTargetException(target)
+        else:
+            self.send_command('kick %s' % target)
 
     def ban(self, target):
-        if not isinstance(target, list):
-            target = [target,]
-        map(self.send_command, ['ban %s' % player for player in filter(
-            lambda player: player in self.query_players(), target)])
+        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', target.strip()):
+            self._ban_ip(target)
+        else:
+            self._ban_player(target)
+
+    def _ban_player(self, player):
+        if player.lower() in self.banned_players:
+            raise ClientInvalidTargetException(player, 'is already banned')
+        else:
+            self.send_command('ban %s' % player)
+
+    def _ban_ip(self, ip):
+        if ip in self.banned_ips:
+            raise ClientInvalidTargetException(ip, 'is already banned')
+        else:
+            self.send_command('ban-ip %s' % ip)
 
     def unban(self, target):
-        if not isinstance(target, list):
-            target = [target,]
-        map(self.send_command, ['pardon %s' % player for player in filter(
-            lambda player: player in self.query_players(), target)])
+        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', target.strip()):
+            self._unban_ip(target)
+        else:
+            self._unban_player(target)
+
+    def _unban_player(self, player):
+        if player.lower() not in self.banned_players:
+            raise ClientInvalidTargetException(player, 'is not banned')
+        else:
+            self.send_command('pardon %s' % player)
+
+    def _unban_ip(self, ip):
+        if ip not in self.banned_ips:
+            raise ClientInvalidTargetException(ip, 'is not banned')
+        else:
+            self.send_command('pardon-ip %s' % ip)
+
+    def op(self, player):
+        if player in self.ops:
+            raise ClientInvalidTargetException(player, 'is already an op')
+        else:
+            self.send_command('op %s' % player)
+
+    def deop(self, player):
+        if player not in self.ops:
+            raise ClientInvalidTargetException(player, 'is not an op')
+        else:
+            self.send_command('deop %s' % player)
 
     def give(self, player, item, quantity=1):
-        stack_size = 64
-        stacks, remainder = divmod(quantity, stack_size)
-        for stack in range(stacks):
-            self.send_command('give %s %i %i' % (player, item, stack_size))
-        if remainder is not 0:
-            self.send_command('give %s %i %i' % (player, item, remainder))
+        stacks, remainder = divmod(quantity, self._stack_size)
+        if player.lower() not in self.players:
+            raise ClientInvalidTargetException(player)
+        else:
+            for stack in range(stacks):
+                self.tell(player, 'Giving you %i (stack #%i) of %i' % (self._stack_size, stack, item))
+                self.send_command('give %s %i %i' % (player, item, self._stack_size))
+            if remainder is not 0:
+                self.tell(player, 'Giving you the remaining %i of %i' % (remainder, item))
+                self.send_command('give %s %i %i' % (player, item, remainder))
 
-    def tell(self, target, message):
-        line_width = 44
-        message = wrap(
-            message,
-            width=line_width,
-            subsequent_indent='  ')
-        if not isinstance(target, list):
-            target = [target,]
-        for player in target:
-            for line in message:
-                self.send_command('tell %s %s' % (player, line))
-
-if __name__ == '__main__':
-    import sys
-    client = MultiplexClient(sys.argv[1])
-    client.start()
+    def tell(self, target, message, no_wrap=False):
+        if player.lower() not in self.players:
+            raise ClientInvalidTargetException(player)
+        else:
+            if no_wrap:
+                self.send_command('tell %s %s' % (target, message))
+            else:
+                message = wrap(
+                    message,
+                    width=self._line_width,
+                    subsequent_indent=self._tell_wrap_indent)
+                for line in message:
+                    self.send_command('tell %s %s' % (target, line))
+                
+    def tp(self, source, destination):
+        if source.lower() not in self.players:
+            raise ClientInvalidTargetException(source)
+        elif destination.lower() not in self.players:
+            raise ClientInvalidTargetException(destination)
+        else:
+            self.send_command('tp %s %s' % (source, destination))
