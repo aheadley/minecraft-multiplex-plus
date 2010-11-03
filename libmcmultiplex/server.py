@@ -16,8 +16,6 @@ class Server(object):
     default_config = """
     [%s]
     port=9001
-    password=
-    password_gracetime=15
     socket_type=AF_UNIX
     listen_addr=%s.sock
     listen_timeout=10
@@ -64,6 +62,9 @@ class Server(object):
         self.send_minecraft_command('stop')
         self.running = False
 
+    def dispatch_event(self, line):
+        pass
+
     def _run(self):
         self.clients = {}
         keep_running = True
@@ -78,68 +79,60 @@ class Server(object):
             except Exception:
                 continue
 
-            if not read_ready:
-                for client in self.clients:
-                    if time() - self.clients[client]['connected'] > \
-                        int(self.config[self._config_name]['password_gracetime']) and \
-                        not self.config[self._config_name]['password']:
-                        self.remove_peer(client)
-                        break
-            else:
-                for sock in read_ready:
-                    if sock is sys.stdin:
-                        self.send_minecraft_command(sock.readline())
-                    elif sock is self.socket:
-                        client, address = self.socket.accept()
-                        self.outputs.append(client)
+            for sock in read_ready:
+                if sock is sys.stdin:
+                    self.send_minecraft_command(sock.readline())
+                elif sock is self.socket:
+                    client, address = self.socket.accept()
+                    self.outputs.append(client)
 
-                        if self.config[self._config_name]['password']:
-                            self.send_peer(client, '- Enter password')
-                        else:
-                            self.send_pear(client, '+ Welcome')
+                    if self.config[self._config_name]['password']:
+                        self.send_peer(client, '- Enter password')
+                    else:
+                        self.send_pear(client, '+ Welcome')
 
-                        self.clients[client] = {
-                            'socket': client,
-                            'auth': bool(self.config[self._config_name]['password']),
-                            'connected': time(),
-                        }
-                    elif sock in self.clients:
-                        try:
-                            buffer = sock.recv(256)
-                            if not buffer:
-                                self.remove_peer(sock)
-                            else:
-                                if not self.clients[sock]['auth']:
-                                    if buffer.rstrip() != self.config['password']:
-                                        self.send_peer(
-                                            sock,
-                                            '- Bad password')
-                                        self.remove_peer(sock)
-                                    else:
-                                        self.clients[sock]['auth'] = True
-                                        self.send_pear(sock, '+ Password accepted')
-                                    continue
-
-                                if buffer.rstrip() == '.close':
-                                    self.send_peer(sock, '+ Closing')
-                                    self.remove_peer(sock)
-                                elif buffer.rstrip() == '.time':
-                                    self.send_peer(sock, '+ Start time %i' %
-                                        int(self.start_time))
-                                else:
-                                    self.send_minecraft_command(buffer.rstrip())
-                        except Exception:
+                    self.clients[client] = {
+                        'socket': client,
+                        'auth': bool(self.config[self._config_name]['password']),
+                        'connected': time(),
+                    }
+                elif sock in self.clients:
+                    try:
+                        buffer = sock.recv(256)
+                        if not buffer:
                             self.remove_peer(sock)
-                    elif sock is self.minecraft_server.stderr or \
-                        sock is self.minecraft_server.stdout:
-                        line = sock.readline().rstrip()
-                        if not line:
-                            keep_running = False
                         else:
-                            for client in self.clients:
-                                if clients[client]['auth']:
-                                    if self.send_peer(client, line) is 0:
-                                        self.remove_peer(client)
+                            if not self.clients[sock]['auth']:
+                                if buffer.rstrip() != self.config['password']:
+                                    self.send_peer(
+                                        sock,
+                                        '- Bad password')
+                                    self.remove_peer(sock)
+                                else:
+                                    self.clients[sock]['auth'] = True
+                                    self.send_pear(sock, '+ Password accepted')
+                                continue
+
+                            if buffer.rstrip() == '.close':
+                                self.send_peer(sock, '+ Closing')
+                                self.remove_peer(sock)
+                            elif buffer.rstrip() == '.time':
+                                self.send_peer(sock, '+ Start time %i' %
+                                    int(self.start_time))
+                            else:
+                                self.send_minecraft_command(buffer.rstrip())
+                    except Exception:
+                        self.remove_peer(sock)
+                elif sock is self.minecraft_server.stderr or \
+                    sock is self.minecraft_server.stdout:
+                    line = sock.readline().rstrip()
+                    if not line:
+                        keep_running = False
+                    else:
+                        for client in self.clients:
+                            if clients[client]['auth']:
+                                if self.send_peer(client, line) is 0:
+                                    self.remove_peer(client)
 
     def send_peer(self, peer, message):
         try:
