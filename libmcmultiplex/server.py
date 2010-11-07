@@ -8,7 +8,11 @@ import select
 import sys
 import os.path
 from StringIO import StringIO
-
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+    
 class ServerException(Exception):
     pass
 
@@ -19,11 +23,13 @@ class Server(object):
     socket_type=AF_UNIX
     listen_addr=%s.sock
     listen_timeout=10
+    socket_buffer_size=1024
     [java]
     server_jar=minecraft_server.jar
     server_gui=false
     heap_max=1024M
     heap_min=1024M
+    extra_options=
     """
     _config_name = 'Server'
 
@@ -47,29 +53,59 @@ class Server(object):
             self._start_minecraft()
             self._run()
         except KeyboardInterrupt:
-            self.send_minecraft_command('stop')
-            self.minecraft_server.wait()
+            self.stop()
 
     def stop(self):
         for client in self.clients:
             try:
                 client.close()
-            except:
+            except socket.error:
                 pass
         self.socket.close()
         if self.config[self._config_name]['socket_type'] == 'AF_UNIX':
             os.remove(self.config[self._config_name]['listen_addr'])
         self.send_minecraft_command('stop')
+        self.minecraft_server.wait()
         self.running = False
 
-    def dispatch_event(self, line):
-        pass
+    def dispatch_event(self, client, line):
+        if line.startswith('|'):
+            self.send_minecraft_command(line.lstrip('|'))
+        elif line.startswith('!'):
+            try:
+                self.public[line.lstrip('!').split()[0]] = pickle.loads(' '.join(line.lstrip('?').split()[1:]))
+            except pickle.PickleError:
+                self.send_peer(client, '+503')
+            else:
+                self.send_peer(client, '+200')
+        elif line.startswith('?'):
+            try:
+                self.send_peer(client, '!%s %s' % (line.lstrip('?').split()[0], pickle.dumps(self.public[line.lstrip('?').split()[0]])))
+            except IndexError:
+                #no token, send 503 error
+                self.send_peer(client, '+503')
+            except KeyError:
+                #var not found, send 404
+                self.send_peer(client, '+404')
+        elif line.startswith('+'):
+            if self.authenticate_client(client, line[1:]):
+                self.send_peer(client, '+200')
+            else:
+                self.send_peer(client, '+403')
+                self.remove_peer(client)
+        elif line.startswith('-'):
+            self.send_peer(client, '-200')
+            self.remove_peer(client)
+        else: pass
+        
+    def authenticate_client(client, initial_message):
+        return True
 
     def _run(self):
         self.clients = {}
-        keep_running = True
+        self.public = {}
 
-        while keep_running:
+        while self.running:
             try:
                 read_ready, write_ready, except_ready = select.select(
                     self.outputs,
@@ -85,64 +121,39 @@ class Server(object):
                 elif sock is self.socket:
                     client, address = self.socket.accept()
                     self.outputs.append(client)
-
-                    if self.config[self._config_name]['password']:
-                        self.send_peer(client, '- Enter password')
-                    else:
-                        self.send_pear(client, '+ Welcome')
-
                     self.clients[client] = {
                         'socket': client,
-                        'auth': bool(self.config[self._config_name]['password']),
                         'connected': time(),
                     }
+                    self.send_peer(client, '+')
                 elif sock in self.clients:
                     try:
-                        buffer = sock.recv(256)
+                        buffer = sock.recv(self.config[self._config_name]['socket_buffer_size'])
                         if not buffer:
                             self.remove_peer(sock)
                         else:
-                            if not self.clients[sock]['auth']:
-                                if buffer.rstrip() != self.config['password']:
-                                    self.send_peer(
-                                        sock,
-                                        '- Bad password')
-                                    self.remove_peer(sock)
-                                else:
-                                    self.clients[sock]['auth'] = True
-                                    self.send_pear(sock, '+ Password accepted')
-                                continue
-
-                            if buffer.rstrip() == '.close':
-                                self.send_peer(sock, '+ Closing')
-                                self.remove_peer(sock)
-                            elif buffer.rstrip() == '.time':
-                                self.send_peer(sock, '+ Start time %i' %
-                                    int(self.start_time))
-                            else:
-                                self.send_minecraft_command(buffer.rstrip())
+                            self.dispatch_event(sock, buffer.strip())
                     except Exception:
                         self.remove_peer(sock)
                 elif sock is self.minecraft_server.stderr or \
                     sock is self.minecraft_server.stdout:
                     line = sock.readline().rstrip()
                     if not line:
-                        keep_running = False
+                        self.stop()
                     else:
                         for client in self.clients:
-                            if clients[client]['auth']:
-                                if self.send_peer(client, line) is 0:
-                                    self.remove_peer(client)
+                            if self.send_peer(client, line) is 0:
+                                self.remove_peer(sock)
 
     def send_peer(self, peer, message):
         try:
-            return peer.send('%s\r\n' % message)
+            return peer.send(message + '\r\n')
         except Exception:
             pass
 
     def remove_peer(self, peer):
         try:
-            self.clients.pop(peer)
+            del self.clients[peer]
         except KeyError:
             pass
         try:
@@ -155,6 +166,7 @@ class Server(object):
     def _start_minecraft(self):
         command = [
             'java',
+            self.config['java']['extra_options'],
             '-Xmx%s' % self.config['java']['heap_max'],
             '-Xms%s' % self.config['java']['heap_min'],
             '-jar',
@@ -192,7 +204,7 @@ class Server(object):
         self.socket.listen(self.config[self._config_name]['listen_timeout'])
         
     def send_minecraft_command(self, command):
-        self.minecraft_server.stdin.write('%s\n' % command)
+        self.minecraft_server.stdin.write(command + '\n')
 
     def load_config(self, config):
         self.config = {}
@@ -219,7 +231,3 @@ class Server(object):
 
     def save_config(self):
         pass
-
-if __name__ == '__main__':
-    server = Server(sys.argv[1])
-    server.start()
